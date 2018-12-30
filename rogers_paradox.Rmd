@@ -1,0 +1,718 @@
+---
+title: 'Rogers'' paradox: An agent-based model in R'
+author: "Alex Mesoudi"
+output: 
+  pdf_document:
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 8
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+Rogers (1988) presented a model exploring the evolution of social learning relative to individual learning, in a changing environment. The result, since known as 'Rogers' paradox', is that a population containing social learners can never have higher fitness than a population with no social learners. While not inherently paradoxical, this runs counter to the common claim that social learning underpins our species' unusual evolutionary success.
+
+In the model, agents exhibit one of two behaviours. One behaviour is 'correct' in the current environment, the other is 'incorrect'. Correct behaviour results in higher fitness than incorrect behaviour. Periodically, the environment changes such that previously correct behaviours are no longer correct.
+
+Agents can be either *individual learners*, who directly sample the environment and determine the correct behaviour with a fixed probability, or *social learners*, who select another agent at random and copy their behaviour. Individual learning is assumed to be more costly than social learning.
+
+In a changing environment, a frequency-dependent equilibrium exists between social learners (aka information scroungers) and individual learners (aka information producers), similar to producer-scrounger dynamics in feeding behaviour. When rare, social learners can copy adaptive behaviour from individual learners without bearing the higher cost of individual learning. They therefore do better than individual learners and increase in frequency. But when the environment changes, social learners are left copying out-of-date information from other social learners. Individual learners now do better, because they can detect the environmental change and identify the new correct behaviour.
+
+At this equilibrium, social and individual learners must have equal fitness, by definition. Hence, social learning does not increase overall population fitness, relative to a population entirely composed of individual learners.
+
+## Model outline
+
+There exist $N$ agents who reproduce each generation. Generations are non-overlapping such that $N$ new agents are created each generation to replace the $N$ previous agents. 
+
+Agents are either individual or social learners, and can have either correct or incorrect behaviour given the current state of the environment. 
+
+Each generation, individual learners acquire the correct behaviour with probability $p$. Social learners choose one of the previous generation at random (irrespective of whether they are social or individual learners) and copy their behaviour. 
+
+The first generation is entirely made up of individual learners. Agents reproduce asexually in proportion to their fitness, which is determined by whether they have the correct behaviour (+$b$) or not (-$b$), as well as intrinsic costs to individual ($c$) and social ($s$) learning (where $c>s$). There is a small mutation rate $\mu$ for learning strategy such that offspring sometimes have different learning styles to their parent. This is how social learning is introduced into the population. 
+
+The environment shifts with probability $u$ each generation. The simulation is run for $t_{max}$ generations with multiple independent runs. 
+
+In Rogers' model the environment switched between one of two states. However this can sometimes lead to odd dynamics under high rates of environmental change, as agents can copy behaviour from the previous generation that was then incorrect, but is now correct. Instead the current model uses more realistic never-repeating environments, such that with probability $u$ the environment switches to an entirely novel state.
+
+## Parameters
+
+Symbols are the same as in Rogers' original paper, where possible.
+
+* $w$, the baseline fitness given to all agents, fixed at $w=1$
+* $b$, the fitness bonus/penalty for being in the right/wrong environment, fixed at $b=0.5$ (so agent fitness is $w+b$ when behaviour matches the environment, or $w-b$ if it doesn't)
+* $c$, where $bc$ = the cost of individual learning. Constrained such that $b(1+c)<1$, to avoid negative fitnesses
+* $s$, where $bs$ = the cost of social learning. Constrained again to $b(1+s)<1$
+* $u$, the probability on each generation of an environmental shift ($0<u<1$)
+* $N$, the number of agents ($N>0$)
+* $\mu$, the probability of a new agent having a different learning strategy to its parent (i.e. the mutation rate) ($0< \mu <1$)
+* $p$, the probability of an individual learner learning the correct behaviour. NB this was always 1 in Rogers' original model ($0.5<p<1$)
+* $t_{max}$, the maximum number of generations per run
+* $runs$, the number of simulation runs 
+
+## Basic model output
+
+Figure 1 shows an illustrative case of Rogers' paradox, with a moderately changing environment and reasonable cost of individual learning. The top graph shows the proportion of the population who are social learners. The rest are individual learners. The bottom graph shows the overall population fitness. The horizontal line in the bottom figure shows the expected fitness of a population of 100% individual learners. Lines are mean values calculated from multiple runs, with grey areas indicating ranges (maximum and minimum values for all runs).
+
+For the parameter values shown in Figure 1, one can see that social and individual learners co-exist (top figure) and the population as a whole never exceeds the pure individual learning fitness (bottom figure). This is Rogers' paradox.
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Illustrative run showing Rogers' paradox"}
+# install & load packages---------------------------
+library(ggplot2)
+library(Rmisc)
+
+# initialise agent data frame
+InitialiseAgent <- function (N) {
+  # create vectors of length N:
+  # 'learning' style is initially all individual, 'behaviour' and 'fitness' are all NA
+  learning <- rep("individual", N)
+  behaviour <- rep(NA, N)
+  fitness <- rep(NA, N)
+  
+  # combine them into a data frame to return, ensuring that none become factors
+  data.frame(behaviour, learning, fitness, stringsAsFactors = FALSE)
+}
+
+# environmental change function
+EnvironmentalChange <- function(E, u) { 
+  # generate 1 random number between 0 and 1. If less than u, change the environment
+  if (runif(1) < u) {  
+    E <- E + 1 } # increment environment to a new novel value
+  E  # return E
+}
+
+# initialise output data frame, to store results
+InitialiseOutput <- function(t.max) {
+  timestep <- vector("numeric",t.max)  # timestep
+  n.SL <- vector("numeric",t.max)  # number of social learners
+  w.SL <- vector("numeric",t.max)  # fitness of social learners
+  W <- vector("numeric",t.max)  # total absolute fitness of population
+  data.frame(timestep, n.SL, w.SL, W)  # return this as 'output'
+}
+
+#learning function
+LearningStage <- function (agent, p, E, agent.previous) {
+  
+  # individual learners:
+  individual.learners <- agent$learning == "individual"  # vector of individual learners
+  success <- runif(nrow(agent))  # vector with N random numbers each between 0 and 1
+  agent$behaviour[individual.learners & success < p] <- E  # if agent is an individual learner, and p exceeds success, then they learn the correct behaviour
+  agent$behaviour[individual.learners & success >= p] <- E - 1  # otherwise, they learn incorrect behaviour, always correct behaviour minus one
+  
+  # social learners:
+  social.learners <- agent$learning == "social"  # vector of social learners
+  # continue only if there are social learners
+  if (sum(social.learners) > 0) {  
+    # a vector containing randomly chosen demonstrators, one for each social learner. With replacement, so that demonstrators can be picked more than once. Note they can potentially copy themselves, but for large N this is rare
+    demonstrators <- sample(1:nrow(agent), sum(social.learners), replace = TRUE)  
+    # now copy the behaviour of demonstrators into behaviour of social learners
+    agent$behaviour[social.learners] <- agent.previous$behaviour[demonstrators]  
+  }
+  
+  agent  # return agent data frame
+}
+
+#  functions for getting fitness & number of learners, plus overall mean fitness W
+GetSLnumber <- function (agent) {
+  sum(agent$learning == "social") / nrow(agent) } # return n.SL as a proportion of N
+
+GetW <- function (agent) {
+  sum(agent$fitness, na.rm = TRUE) } # return the total fitness of all agents
+
+GetSLfitness <- function (agent) {
+  if (sum(agent$learning == "social") > 0) {  # if there is at least one social learner
+    w.SL <- mean(agent$fitness[agent$learning == "social"])  # get their mean fitness
+  } else {
+    w.SL <- 0  # otherwise return zero
+  }
+  w.SL
+}
+
+#  calculate fitness of agents
+CalculateFitness <- function (agent, w, E, b, c, s) {
+  # start with baseline fitness w
+  agent$fitness <- w  
+  
+  # for those agents with behaviour matched to the environment, add b
+  agent$fitness[agent$behaviour == E] <- agent$fitness[agent$behaviour == E] + b  
+  # for those agents with behaviour not matched to the environment, subtract b
+  agent$fitness[agent$behaviour != E] <- agent$fitness[agent$behaviour != E] - b  
+  
+  # impose cost b*c on individual learners
+  agent$fitness[agent$learning == "individual"] <- agent$fitness[agent$learning == "individual"] - b*c  
+  # impose cost b*s on social learners
+  agent$fitness[agent$learning == "social"] <- agent$fitness[agent$learning == "social"] - b*s  
+  agent  # return updated agent
+}
+
+#  produce new generation from previous
+ReproductionStage <- function (agent, agent.previous, mu) {
+  
+  # from now on, agent denotes new generation, agent.previous denotes previous
+  
+  agent$behaviour <- NA  # reset agent's behaviour and fitness
+  agent$fitness <- NA
+  
+  # to determine learning, need to get probability of individual learner being a parent, weighted by relative fitness
+  W <- GetW(agent.previous)  # get overall total fitness of previous generation
+  # get probability of new agent being an individual learner, weighted by fitness
+  if (sum(agent.previous$learning == "individual") > 0) {
+    prob.IL <- sum(agent.previous$fitness[agent.previous$learning == "individual"]) / W 
+  } else {
+    prob.IL <- 0
+  }
+
+  # vector with random numbers each between 0 and 1, to determine probability of being an individual learner
+  success.IL <- runif(nrow(agent.previous))  
+  # vector with random numbers each between 0 and 1, to determine probability of mutation
+  success.mu <- runif(nrow(agent.previous))  
+  
+  # if parent is an ind learner and no mutation, then they're an ind learner
+  agent$learning[success.IL < prob.IL & success.mu >= mu] <- "individual"  
+  # if parent is a social learner and no mutation, then they're a social learner
+  agent$learning[success.IL >= prob.IL & success.mu >= mu] <- "social"  
+  # if parent is an ind learner plus mutation, then they're a social learner
+  agent$learning[success.IL < prob.IL & success.mu < mu] <- "social"  
+  # if parent is a social learner, plus mutation, then they're an ind learner
+  agent$learning[success.IL >= prob.IL & success.mu < mu] <- "individual"  
+  
+  agent  # return agent
+}
+
+# update output data frame
+GetOutput <- function(output, t, agent) {
+  output$timestep[t] <- t
+  output$n.SL[t] <- GetSLnumber(agent)
+  output$w.SL[t] <- GetSLfitness(agent)
+  output$W[t] <- GetW(agent) / nrow(agent)
+  output
+}
+
+#  run the simulation once
+RunSimulation <- function (N, t.max, u, p, w, b, c, s, mu, output) {
+  
+  # check parameters, to avoid negative fitnesses
+  if (b*(1+c) > 1 || b*(1+s) > 1) {
+    stop("Invalid parameter values: ensure b*(1+c) < 1 and b*(1+s) < 1")
+  }
+  
+  #initialise agent data frame
+  agent <- InitialiseAgent(N)
+  
+  #  initialise environment E
+  E <- 0
+  
+  for (t in 1:t.max) { # cycle thru timesteps
+    
+    #  update agent as a result of learning
+    agent <- LearningStage(agent, p, E, agent.previous)
+    
+    #  update agent's fitness as a result of fitness calculations
+    agent <- CalculateFitness(agent, w, E, b, c, s)
+    
+    #  get variables needed for the plots later on
+    output <- GetOutput(output, t, agent)
+    
+    # copy this generation into agent.previous, to serve as demonstrators to next gen's social learners
+    agent.previous <- agent
+    
+    #  create new generation of agents from agent.previous
+    agent <- ReproductionStage(agent, agent.previous, mu)
+    
+    #  possible environmental change
+    E <- EnvironmentalChange(E, u)
+    
+  }  # end of timestep-for
+  
+  output  # return output data frame
+}
+
+# simulation loop, repeat 'runs' times and append output to output dataframe 
+SimulationLoop <- function (runs, N, t.max, u, p, w, b, c, s, mu) {
+  
+  # initialise output data frame
+  output <- InitialiseOutput(t.max)
+  
+  # set up runs loop, each run produces output. Add to output dataframe if it already exists
+  for (i in 1:runs) {
+    
+    # for first run, create output data frame
+    if (i == 1) {
+    output <- RunSimulation(N, t.max, u, p, w, b, c, s, mu, output)
+    } else {
+      # otherwise add it on to the end of output
+      output <- rbind(output, RunSimulation(N, t.max, u, p, w, b, c, s, mu, output))
+    }
+  }  # end of runs-loop
+  
+  # draw plots
+  DrawPlots(output, N, w, b, p, c, u, s, mu, runs)
+
+}
+
+GetOutputSummary <- function (output) {
+  # take the full multiple-runs output and generate means, maxs and mins across timesteps
+  mean <- aggregate(output[, 2:4], by = list(output$timestep), mean)  # gives means
+  max <- aggregate(output[, 2:4], by = list(output$timestep), max)  # gives maximums
+  min <- aggregate(output[, 2:4], by = list(output$timestep), min)  # gives minimums
+  
+  # return output.summary
+  data.frame(mean$n.SL, min$n.SL, max$n.SL, mean$w.SL, min$w.SL, max$w.SL, mean$W, min$W, max$W)
+}
+
+DrawPlots <- function (output, N, w, b, p, c, u, s, mu, runs) {
+
+  # first need to get means and maximums/minimums from raw output
+  output.summary <- GetOutputSummary(output)
+  
+  # create the graph title from parameter values
+  graph.title <- paste("t.max = " ,nrow(output.summary), ", ", "N = ", N, ", ", "w = ", w, ", ", "b = ", b, ", ", "c = ", c, ", ", "s = ", s, ", ", "u = ", u, ", ", "mu = ", mu, ", ", "p = ", p, ", ", "runs = ", runs, sep = "")
+
+  # plot number of social learners
+  plot1 <- ggplot(data = output.summary, aes(x = 1:nrow(output.summary), y = mean.n.SL)) + geom_line() + geom_ribbon(aes(ymin = min.n.SL, ymax = max.n.SL), alpha = 0.2) + labs(x = "Generation", y = "Freq of social learners") + scale_y_continuous(limits = c(0,1)) + theme_classic(base_size = 14) + ggtitle(graph.title) + theme(plot.title = element_text(size = 12), axis.line.x = element_line(colour = "black", size = 0.5), axis.line.y = element_line(colour = "black", size = 0.5))
+  
+  # plot mean population fitness, W, with a dotted line showing expected W in a population of all individual learners
+  plot2 <- ggplot(data = output.summary, aes(x = 1:nrow(output.summary), y = mean.W)) + geom_line() + geom_ribbon(aes(ymin = min.W, ymax = max.W), alpha = 0.2) + geom_hline(yintercept = w + b*(2*p - c - 1), linetype = 2) + labs(x = "Generation", y = "Population fitness") + scale_y_continuous(limits = c(0,NA)) + theme_classic(base_size = 14) + theme(axis.line.x = element_line(colour = "black", size = 0.5), axis.line.y = element_line(colour = "black", size = 0.5))
+  
+  # optionally: save to png image in folder 'graphs' with filename indicating parameters
+  #graph.name <- paste("graphs/", "N" ,nrow(output.summary),"_w", w, "_b", b, "_c", c, "_s", s, "_u", u, "_mu", mu, "_p", p, "_runs", runs, ".png", sep = "")
+  
+  #png(file = graph.name, width = 20, height = 20, units = "cm", res = 300)
+  #multiplot(plot1, plot2)
+  #dev.off()
+
+  # display 3 plots using multiplot from Rmisc
+  multiplot(plot1, plot2)
+}
+
+# main function, with defaults
+RogersModel <- function (runs = 10, N = 1000, t.max = 250, u = 0.2, p = 1, w = 1, b = 0.5, c = 0.9, s = 0.0, mu = 0.01, runin = 100) {
+  
+  # run loops with defaults
+  SimulationLoop(runs, N, t.max, u, p, w, b, c, s, mu)
+
+}
+
+# run simulation here (all default values)
+RogersModel()
+
+```
+
+## Environmental change
+
+Removing environmental change, i.e. setting $u=0$, causes social learning to entirely replace individual learning (Figure 2). The initial individual learners do all the work of identifying the correct behaviour, and then social learners take over due to their lower learning costs. They never suffer from copying out-of-date behaviour as they do in Figure 1, because behaviour never becomes out-of-date. Here Rogers' paradox no longer applies, as the population of social learners does better than a population of individual learners (bottom graph of Figure 2).
+
+In contrast, when the environment changes very rapidly $(u=0.8)$, then individual learning becomes more common (Figure 3). Individual learners can track the environmental change, unlike social learners.
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Unchanging environments favour social learning"}
+RogersModel(u = 0)
+
+```
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Rapidly changing environments favour individual learning"}
+RogersModel(u = 0.8)
+
+```
+
+
+## Cost and accuracy of individual learning
+
+Making individual learning less costly (reducing $c$) reduces the frequency of social learning (Figure 4). Making individual learning less accurate (reducing $p$) increases the frequency of social learning (Figure 5). Note that in the latter case, Rogers' paradox still holds. The heatmap in Figure 6 shows how social learning evolves when environments are stable and individual learning is costly. Figure 7 shows the same, but for inaccurate individual learning.
+
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Reducing the cost of individual learning favours individual learning"}
+RogersModel(c = 0.4)
+
+```
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Reducing the accuracy of individual learning favours social learning"}
+RogersModel(p = 0.7)
+
+```
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Social learning evolves when environments are stable and individual learning is costly"}
+
+# main function but without graphs and things, much quicker, returns SL frequency
+RogersModelShort <- function (runs = 5, N = 1000, t.max = 250, u = 0.2, p = 1, w = 1, b = 0.5, c = 0.9, s = 0.0, mu = 0.01, runin = 100) {
+  
+  # initialise output data frame
+  output.SLfreq <- 0
+  
+  # set up runs loop, each run produces output. Add to output dataframe if it already exists
+  for (i in 1:runs) {
+    output <- InitialiseOutput(t.max)
+    output <- RunSimulation(N, t.max, u, p, w, b, c, s, mu, output)
+    output.SLfreq <- output.SLfreq + mean(output$n.SL[output$timestep > runin])
+  }  # end of runs-loop
+  
+  output.SLfreq / runs # get mean SLfreq from all runs and return
+}
+
+# higher-level loop plotting frequency of SL for ranges of u and c
+DrawHeatMap_uc <- function(runs, p) {
+
+  # initialise 11x11 dataframe 'heat'
+  c.heat <- rep(0:10, 11) # for now these are 0-10 to use in loops, convert to 0-1 later
+  u.heat <- rep(0:10, each = 11)
+  value.heat <- rep(0,121)
+  heat <- data.frame(c.heat, u.heat, value.heat)  
+
+# add values to heat matrix
+for (u.loop in 0:10)
+{
+  for (c.loop in 0:10)
+  {
+    heat$value.heat[heat$c.heat == c.loop & heat$u.heat == u.loop] <- RogersModelShort(u = u.loop/10, c = c.loop/10, runs = runs, p = p)
+  }
+}
+
+# convert c.heat and u.heat values
+heat$c.heat <- heat$c.heat / 10
+heat$u.heat <- heat$u.heat / 10
+
+# draw heatmap
+names(heat)[3] <- "Freq of social learners"  # easier than changing legend title via ggplot!
+ggplot(data = heat, aes(x = c.heat, y = u.heat)) + geom_tile(aes(fill = `Freq of social learners`)) + labs(x = "c, cost of individual learning", y = "u, prob of environmental change") + scale_y_continuous(breaks = seq(0,1, by=0.1)) + scale_x_continuous(breaks = seq(0,1, by=0.1)) + theme_bw(base_size = 20) + scale_fill_gradient(low = "yellow", high = "red3", name="freq(SL)")
+}
+
+# higher-level loop plotting frequency of SL for ranges of u and p
+DrawHeatMap_up <- function(runs, c) {
+  
+  # initialise 11x11 dataframe 'heat'
+  p.heat <- rep(0:10, 11) # for now these are 0-10, convert to 0-1 later
+  u.heat <- rep(0:10, each = 11)
+  value.heat <- rep(0,121)
+  heat <- data.frame(p.heat, u.heat, value.heat)  
+  
+  # add values to heat matrix
+  for (u.loop in 0:10)
+  {
+    for (p.loop in 0:10)
+    {
+      heat$value.heat[heat$p.heat == p.loop & heat$u.heat == u.loop] <- RogersModelShort(u = u.loop/10, p = p.loop/10, runs = runs, c = c)
+    }
+  }
+  
+  # convert c.heat and u.heat values
+  heat$p.heat <- heat$p.heat / 10
+  heat$u.heat <- heat$u.heat / 10
+  
+  # draw heatmap
+  names(heat)[3] <- "Freq of social learners"  # easier than changing legend title via ggplot!
+  ggplot(data = heat, aes(x = p.heat, y = u.heat)) + geom_tile(aes(fill = `Freq of social learners`)) + labs(x = "p, prob of successful individual learning", y = "u, prob of environmental change") + scale_y_continuous(breaks = seq(0,1, by=0.1)) + scale_x_continuous(breaks = seq(0,1, by=0.1)) + theme_bw(base_size = 20) + scale_fill_gradient(low = "yellow", high = "red3", name="freq(SL)")
+  }
+
+DrawHeatMap_uc(runs = 1, p = 0.5)
+
+```
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Social learning evolves when environments are stable and individual learning is inaccurate"}
+
+DrawHeatMap_up(runs = 1, c = 0.9)
+
+```
+
+## Critical social learning
+
+Enquist, Erikkson & Ghirlanda (2007) proposed a 'solution' to Rogers' paradox by relaxing the unrealistic assumption that organisms can only do either individual learning or social learning. In reality organisms typically do both, or at least have the capacity to do both. Enquist et al. (2007) proposed a third heritable strategy, *critical social learning*, in which individuals first try social learning, and if the result is unsatisfactory, then they try individual learning. As shown in Figure 8, critical social learners outperform pure individual learners and pure social learners (top panel). Moreover, they do not suffer from Rogers' paradox (bottom panel), clearly exceeding the fitness of pure individual learners.
+
+```{r echo=FALSE, message=FALSE, fig.cap = "Critical social learning outperforms both social learning and individual learning"}
+
+# load packages---------------------------
+library(reshape2)
+
+#  define functions----------------------------------
+
+# initialise output data frame, to store results
+InitialiseOutput.crit <- function(t.max) {
+  timestep <- vector("numeric",t.max)  # timestep
+  n.SL <- vector("numeric",t.max)  # number of social learners
+  n.IL <- vector("numeric",t.max)  # number of individual learners
+  n.CL <- vector("numeric",t.max)  # number of critical learners
+  w.SL <- vector("numeric",t.max)  # fitness of social learners
+  w.IL <- vector("numeric",t.max)  # fitness of individual learners
+  w.CL <- vector("numeric",t.max)  # fitness of critical learners
+  W <- vector("numeric",t.max)  # total absolute fitness of population
+  data.frame(timestep, n.SL, n.IL, n.CL, w.SL, w.IL, w.CL, W)  # return this as 'output'
+}
+
+# learning function - now incorporates fitness calculations
+LearningStage.crit <- function (agent, p, E, agent.previous, w, b, c, s) {
+
+  # start each agent with baseline fitness w
+  agent$fitness <- w
+  
+  # individual learners
+  individual.learners <- agent$learning == "individual"  # vector of individual learners
+  success <- runif(nrow(agent))  # vector with random numbers each between 0 and 1
+  agent$behaviour[individual.learners & success < p] <- E  # if agent is an individual learner, and p exceeds success, then they learn the correct behaviour
+  agent$behaviour[individual.learners & success >= p] <- 1 - E  # otherwise, they learn the incorrect behaviour
+  # subtract bc from fitness of ILers
+  agent$fitness[individual.learners] <- agent$fitness[individual.learners] - b*c
+  
+  # social learners
+  social.learners <- agent$learning == "social"  # vector of social learners
+  if (sum(social.learners) > 0) {  # do this only if there are social learners
+    demonstrators <- sample(1:nrow(agent), sum(social.learners), replace = TRUE)  # a vector containing randomly chosen demonstrators, one for each social learner. With replacement, so that demonstrators can be picked more than once
+    agent$behaviour[social.learners] <- agent.previous$behaviour[demonstrators]  # copy the behaviour of demonstrators into behaviour of social learners
+    # subtract bs from fitness of SLers
+    agent$fitness[social.learners] <- agent$fitness[social.learners] - b*s
+    }
+  
+  # critical learners
+  critical.learners <- agent$learning == "critical"  # vector of critical learners
+  if (sum(critical.learners) > 0) {  # do this only if there are critical learners
+    demonstrators <- sample(1:nrow(agent), sum(critical.learners), replace = TRUE)  # a vector containing randomly chosen demonstrators, one for each critical learner. With replacement, so that demonstrators can be picked more than once
+    agent$behaviour[critical.learners] <- agent.previous$behaviour[demonstrators]  # copy the behaviour of demonstrators into behaviour of critical learners
+    # subtract bs from fitness of CLers
+    agent$fitness[critical.learners] <- agent$fitness[critical.learners] - b*s
+    
+    # get vector of critical learners who learned the wrong behaviour
+    critical.wrong <- agent$learning == "critical" & agent$behaviour != E
+    
+    if (sum(critical.wrong) > 0) {  # do this only if there are wrong critical learners
+    # repeat individual learning routine on these critical learners
+    success <- runif(nrow(agent))  # vector with random numbers each between 0 and 1
+    agent$behaviour[critical.wrong & success < p] <- E  # if agent is an individual learner, and p exceeds success, then they learn the correct behaviour
+    agent$behaviour[critical.wrong & success >= p] <- 1 - E  # otherwise, they learn the incorrect behaviour
+    # subtract bc from fitness of ILing CLers
+    agent$fitness[critical.wrong] <- agent$fitness[critical.wrong] - b*c
+    
+    }
+  }
+  
+  # for all agents:
+  # for those agents with behaviour matched to the environment, add b
+  agent$fitness[agent$behaviour == E] <- agent$fitness[agent$behaviour == E] + b  
+  # for those agents with behaviour not matched to the environment, subtract b
+  agent$fitness[agent$behaviour != E] <- agent$fitness[agent$behaviour != E] - b  
+    
+  agent  # return agent data frame
+}
+
+# new functions for getting fitness and number of ind and critical learners
+GetILnumber <- function (agent) {
+  sum(agent$learning == "individual") / nrow(agent)  # return n.IL as a proportion of N
+}
+GetCLnumber <- function (agent) {
+  sum(agent$learning == "critical") / nrow(agent)  # return n.CL as a proportion of N
+}
+GetILfitness <- function (agent) {
+  if (sum(agent$learning == "individual") > 0) {  # if there is at least one individual learner
+    w.IL <- mean(agent$fitness[agent$learning == "individual"])  # get their mean fitness
+  } else {
+    w.IL <- 0  # otherwise return zero
+  }
+  w.IL
+}
+GetCLfitness <- function (agent) {
+  if (sum(agent$learning == "critical") > 0) {  # if there is at least one critical learner
+    w.CL <- mean(agent$fitness[agent$learning == "critical"])  # get their mean fitness
+  } else {
+    w.CL <- 0  # otherwise return zero
+  }
+  w.CL
+}
+
+#  produce new generation from previous
+ReproductionStage.crit <- function (agent, agent.previous, mu) {
+  
+  # from now on, agent denotes new generation, agent.previous denotes previous
+  
+  agent$behaviour <- NA  # reset agent's behaviour and fitness
+  agent$fitness <- NA
+  
+  # to determine learning, need to get probability of individual learner being a parent, weighted by relative fitness
+  W <- GetW(agent.previous)  # get overall total fitness of previous generation
+  
+  # get probability of new agent being an IL, weighted by fitness
+  if (sum(agent.previous$learning == "individual") > 0) {
+    prob.IL <- sum(agent.previous$fitness[agent.previous$learning == "individual"]) / W 
+  } else {
+    prob.IL <- 0
+  }
+  
+  # get probability of new agent being an SL, weighted by fitness
+  if (sum(agent.previous$learning == "social") > 0) {
+    prob.SL <- sum(agent.previous$fitness[agent.previous$learning == "social"]) / W 
+  } else {
+    prob.SL <- 0
+  }
+  
+  # vector with random numbers each between 0 and 1, to determine prob of being ind learner
+  success.IL <- runif(nrow(agent.previous))  
+  # second vector to give prob of SL
+  success.SL <- runif(nrow(agent.previous))
+ 
+  # new agent is IL with probability prob.IL
+  agent$learning[success.IL < prob.IL] <- "individual" 
+  # otherwise SL, with prob prob.SL
+  agent$learning[success.IL >= prob.IL & success.SL < prob.SL] <- "social"
+  # otherwise CL
+  agent$learning[success.IL >= prob.IL & success.SL >= prob.SL] <- "critical"
+  
+  # now mutation: 
+  # vector with random numbers each between 0 and 1, to determine probability of mutation for each agent
+  success.mu <- runif(nrow(agent.previous))  
+  # random number 0 or 1, to determine which of the other two learning types to switch to
+  mutant <- sample(0:1,nrow(agent.previous), replace = TRUE)  
+  
+  # individual learners: switch to either social or critical
+  agent$learning[success.mu < mu & agent.previous$learning == "individual" & mutant == 0] <- "social"
+  agent$learning[success.mu < mu & agent.previous$learning == "individual" & mutant == 1] <- "critical"
+  
+  # social learners: switch to either individual or critical
+  agent$learning[success.mu < mu & agent.previous$learning == "social" & mutant == 0] <- "individual"
+  agent$learning[success.mu < mu & agent.previous$learning == "social" & mutant == 1] <- "critical"
+  
+  # critical learners: switch to either social or indiviudal
+  agent$learning[success.mu < mu & agent.previous$learning == "critical" & mutant == 0] <- "social"
+  agent$learning[success.mu < mu & agent.previous$learning == "critical" & mutant == 1] <- "individual"
+  
+  agent  # return agent
+}
+
+GetOutput.crit <- function(output, t, agent) {
+  output$timestep[t] <- t
+  output$n.SL[t] <- GetSLnumber(agent)
+  output$n.IL[t] <- GetILnumber(agent)
+  output$n.CL[t] <- GetCLnumber(agent)
+  output$w.SL[t] <- GetSLfitness(agent)
+  output$w.IL[t] <- GetILfitness(agent)
+  output$w.CL[t] <- GetCLfitness(agent)
+  output$W[t] <- GetW(agent) / nrow(agent)
+  output
+}
+
+#  run the simulation once
+RunSimulation.crit <- function (N, t.max, u, p, w, b, c, s, mu, output) {
+  
+  # check parameters
+  if (b*(1+c) > 1 || b*(1+s) > 1) {
+    stop("Invalid parameter values: ensure b*(1+c) < 1 and b*(1+s) < 1")
+  }
+  
+  #initialise agent data frame
+  agent <- InitialiseAgent(N)
+  
+  #  initialise environment E
+  E <- 0
+  
+  for (t in 1:t.max) { # cycle thru timesteps
+    
+    #  update agent as a result of learning  
+    agent <- LearningStage.crit(agent, p, E, agent.previous, w, b, c, s)
+    
+    #  get variables needed for the plots later on
+    output <- GetOutput.crit(output, t, agent)
+    
+    # copy this generation into agent.previous, to serve as demonstrators to next gen's social learners
+    agent.previous <- agent
+    
+    #  create new generation of agents from agent.previous
+    agent <- ReproductionStage.crit(agent, agent.previous, mu)
+    
+    #  possible environmental change
+    E <- EnvironmentalChange(E, u)
+    
+  }  # end of timestep for
+  
+  output  # return output data frame
+}
+
+# simulation loop, repeat runs times and append output to output dataframe 
+SimulationLoop.crit <- function (runs, N, t.max, u, p, w, b, c, s, mu) {
+  
+  # initialise output data frame
+  output <- InitialiseOutput.crit(t.max)
+  
+  # set up s loop, each run produces output. Add to output dataframe if it already exists
+  for (i in 1:runs) {
+    
+    # for first run, create output data frame
+    if (i == 1) {
+      output <- RunSimulation.crit(N, t.max, u, p, w, b, c, s, mu, output)
+    } else {
+      output <- rbind(output, RunSimulation.crit(N, t.max, u, p, w, b, c, s, mu, output))  # otherwise add it on
+    }
+  }  # end of runs loop
+  
+  # draw plots
+  DrawPlots.crit(output, w, b, p, c, u, s, mu, runs)
+
+}
+
+GetOutputSummary.crit <- function (output) {
+  mean <- aggregate(output[, 2:8], by = list(output$timestep), mean)  # gives means
+  max <- aggregate(output[, 2:8], by = list(output$timestep), max)  # gives maximums
+  min <- aggregate(output[, 2:8], by = list(output$timestep), min)  # gives minimums
+  
+  data.frame(mean$n.SL, min$n.SL, max$n.SL, mean$n.IL, min$n.IL, max$n.IL, mean$n.CL, min$n.CL, max$n.CL, mean$w.SL, min$w.SL, max$w.SL, mean$w.IL, min$w.IL, max$w.IL, mean$w.CL, min$w.CL, max$w.CL, mean$W, min$W, max$W)
+}
+
+DrawPlots.crit <- function (output, w, b, p, c, u, s, mu, runs) {
+  # with ggplot (and multiplot from Rmisc)
+  
+  # first need to get means and maximums/minimums from raw output
+  output.summary <- GetOutputSummary.crit(output)
+  
+  # create the graph title from parameter values
+  graph.title <- paste("N = " ,nrow(output.summary), ", ", "w = ", w, ", ", "b = ", b, ", ", "c = ", c, ", ", "s = ", s, ", ", "u = ", u, ", ", "mu = ", mu, ", ", "p = ", p, ", ", "runs = ", runs, ", ", sep = "")
+  
+  # plot number of different learners
+  # need to melt output into long format first, to plot three lines
+  output.long <- output.summary[, c("mean.n.IL", "mean.n.SL","mean.n.CL")]
+  names(output.long) <- c("Individual", "Social","Critical")
+  output.long$Timestep <- c(1:nrow(output.summary))
+  output.long <- melt(output.long, id = "Timestep", value.name = "Mean", variable.name = "Learning")
+  
+  plot1 <- ggplot(data = output.long, aes(x = Timestep, y = Mean, colour = Learning)) + geom_line() + labs(x = "Generation", y = "Frequency") + scale_y_continuous(limits = c(0,NA)) + theme_classic(base_size = 14) + ggtitle(graph.title) + theme(plot.title = element_text(size = 12), axis.line.x = element_line(colour = "black", size = 0.5), axis.line.y = element_line(colour = "black", size = 0.5))
+  
+  # plot mean fitness of individual, social and critical learners as three lines
+  # need to melt output into long format first, to plot three lines
+  output.long <- output.summary[, c("mean.w.IL", "mean.w.SL","mean.w.CL")]
+  names(output.long) <- c("Individual", "Social", "Critical")
+  output.long$Timestep <- c(1:nrow(output.summary))
+  output.long <- melt(output.long, id = "Timestep", value.name = "Mean", variable.name = "Learning")
+  
+  plot2 <- ggplot(data = output.long, aes(x = Timestep, y = Mean, colour = Learning)) + geom_line() + labs(x = "Generation", y = "Fitness") + scale_y_continuous(limits = c(0,NA)) + theme_classic(base_size = 14) + theme(axis.line.x = element_line(colour = "black", size = 0.5), axis.line.y = element_line(colour = "black", size = 0.5))
+  
+  # plot mean population fitness, W, with a line showing expected W in a population of all individual learners
+  plot3 <- ggplot(data = output.summary, aes(x = 1:nrow(output.summary), y = mean.W)) + geom_line() + geom_ribbon(aes(ymin = min.W, ymax = max.W), alpha = 0.2) + geom_hline(yintercept = w + b*(2*p - c - 1), linetype = 2) + labs(x = "Generation", y = "Population fitness") + scale_y_continuous(limits = c(0,NA)) + theme_classic(base_size = 14) + theme(axis.line.x = element_line(colour = "black", size = 0.5), axis.line.y = element_line(colour = "black", size = 0.5))
+  
+  # optionally, save to png image in folder 'graphs' with filename indicating parameters
+  #graph.name <- paste("graphs/", "N" ,nrow(output.summary),"_w", w, "_b", b, "_c", c, "_s", s, "_u", u, "_mu", mu, "_p", p, "_runs", runs, ".png", sep = "")
+  
+  #png(file = graph.name, width = 20, height = 20, units = "cm", res = 300)
+  #multiplot(plot1, plot2, plot3)
+  #dev.off()
+  
+  # draw the plot again to leave it visible when programme finishes
+  multiplot(plot1, plot2, plot3)
+}
+
+# main function, with defaults
+RogersModel.crit <- function (runs = 10, N = 1000, t.max = 250, u = 0.1, p = 1, w = 1, b = 0.5, c = 0.9, s = 0, mu = 0.01, runin = 100) {
+  
+  SimulationLoop.crit(runs, N, t.max, u, p, w, b, c, s, mu)
+
+}
+
+# run simulation here
+RogersModel.crit()
+
+```
+
+\newpage
+\pagebreak
+
+# References
+
+Enquist, M., Eriksson, K., & Ghirlanda, S. (2007). Critical social learning: A solution to Rogers’ paradox of nonadaptive culture. American Anthropologist, 109(4), 727–734.
+
+Rogers, A. (1988). Does biology constrain culture? American Anthropologist, 90(4), 819–831.
