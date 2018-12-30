@@ -4,15 +4,12 @@ An agent-based model in R illustrating a key result in the evolution of social l
 
 There are standalone R script versions of each model, as well as an RMarkdown version containing model descriptions and explanations of all models and results.
 
-## Files:
+### Files:
 
-rogers_paradox.pdf - description and explanation of the models, with representative model output
-
-rogers_paradox.Rmd - the RMarkdown code used to create rogers_paradox.pdf
-
-rogers_model.R - R script for the basic Rogers model, virtually identical to that contained within rogers_paradox.Rmd
-
-criticalSL.R - R script for the Enquist et al. 'critical social learner' extension, virtually identical to that contained within rogers_paradox.Rmd
+* rogers_paradox.pdf - description and explanation of the models, with representative model output
+* rogers_paradox.Rmd - the RMarkdown code used to create rogers_paradox.pdf
+* rogers_model.R - R script for the basic Rogers model, virtually identical to that contained within rogers_paradox.Rmd
+* criticalSL.R - R script for the Enquist et al. 'critical social learner' extension, virtually identical to that contained within rogers_paradox.Rmd
 
 Use RStudio to knit the Rmd file. Install the following packages before running the scripts: ggplot2, Rmisc, reshape2
 
